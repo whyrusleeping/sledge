@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
+	"os"
 	"encoding/binary"
 	"bytes"
 
@@ -9,97 +12,6 @@ import (
 )
 
 const ledgerVendorID = 11415
-
-func APDUEncode(data []byte) []byte {
-	if len(data) > 59 {
-		panic("no bueno")
-		// TODO: implement message chunking
-	}
-	buf := make([]byte, 64)
-
-	// the channel
-	binary.BigEndian.PutUint16(buf, 0x0101)
-
-	// 
-	buf[2] = 5
-
-	// sequence ID (uint16)
-	binary.BigEndian.PutUint16(buf[3:], 0)
-
-	// command length (uint16)
-	binary.BigEndian.PutUint16(buf[5:], uint16(len(data)))
-
-	copy(buf[7:], data)
-
-
-	return buf
-}
-
-const packetSize = 64
-
-
-func readAPDUPrefix(data []byte) (uint16, byte, uint16) {
-	channel := binary.BigEndian.Uint16(data[:2])
-	tag := data[2]
-	seq := binary.BigEndian.Uint16(data[3:])
-	return channel, tag, seq
-}
-
-func APDUDecode(data []byte) []byte {
-	fmt.Printf("DATA: %x\n", data)
-	ch, tag, seq := readAPDUPrefix(data)
-	if ch != 0x0101 {
-		panic("expected channel to be 0x0101")
-	}
-	if tag != 5 {
-		panic("expected tag to be 5")
-	}
-	if seq != 0 {
-		fmt.Println(seq)
-		panic("expected sequence number to be zero")
-	}
-
-	rlen := binary.BigEndian.Uint16(data[5:])
-	fmt.Println("rlen:",  rlen)
-	fmt.Printf("DATAS: %x\n", data[7:])
-
-	blockSize := rlen
-	if blockSize > packetSize - 7 {
-		blockSize = packetSize - 7
-	}
-
-	out := new(bytes.Buffer)
-
-	out.Write(data[7:7+blockSize])
-
-	data = data[packetSize:]
-
-	for uint16(out.Len()) != rlen {
-		fmt.Println("looping", out.Len(), rlen, len(data))
-		seq++
-		ch, tag, seqn := readAPDUPrefix(data)
-		if ch != 0x0101 {
-			panic("bad channel! bad!")
-		}
-		if tag != 5 {
-			panic("that fuckin tag wasnt five. Don't know why its bad tho")
-		}
-		if seqn != seq {
-			panic("sequence number mismatch")
-		}
-
-		var blockSize uint16
-		if rlen - uint16(out.Len()) > packetSize - 5 {
-			blockSize = packetSize - 5
-		} else {
-			blockSize = rlen - uint16(out.Len())
-		}
-
-		out.Write(data[5:5+blockSize])
-	}
-
-	return out.Bytes()
-}
 
 func main() {
 	devs := hid.Enumerate(ledgerVendorID,0)
@@ -109,9 +21,8 @@ func main() {
 		return
 	}
 	if len(devs) > 1 {
-		fmt.Printf("%d ledgers found, using first\n", len(devs))
-		//fmt.Println(devs)
-		//return
+		fmt.Printf("warning: %d ledgers found, using first\n", len(devs))
+		fmt.Println("===========\nif you don't actually have two ledgers plugged in,\nthen you might get random errors. No idea why this happens yet\n===========")
 	}
 
 	dev := devs[0]
@@ -124,35 +35,92 @@ func main() {
 
 	l := &ledger{odev}
 
-	pubk, addr, _ := l.getPublicKey()
-	fmt.Println("pubkey: ", pubk)
-	fmt.Println("addr: ", addr)
+	switch os.Args[1] {
+	case "btcaddr":
+		if len(os.Args) < 3 {
+			fmt.Println("must pass a path to derive")
+		}
+		path, err := parseHDPath(os.Args[2])
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		_,addr,_, err := l.getPublicKey(path)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println(addr)
+	case "ethaddr":
+		if len(os.Args) < 3 {
+			fmt.Println("must pass a path to derive")
+		}
+		path, err := parseHDPath(os.Args[2])
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		_,addr, err := l.getEthereumAddress(path)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println(addr)
+	}
+}
+
+func parseHDPath(s string) ([]uint32, error) {
+	if len(s) < 3 {
+		return nil, fmt.Errorf("paths must be at least three characters long ('m/1')")
+	}
+	if s[0] != 'm' {
+		return nil, fmt.Errorf("bip32 paths must start with m")
+	}
+
+	parts := strings.Split(s[2:], "/")
+	var out []uint32
+	for _, p := range parts {
+		var hardened bool
+		if strings.HasSuffix(p, "'") {
+			hardened = true
+			p = p[:len(p)-1]
+		}
+		val, err := strconv.ParseUint(p, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		if hardened {
+			val = val | 0x80000000
+		}
+		out = append(out, uint32(val))
+	}
+	return out, nil
 }
 
 type ledger struct {
 	odev *hid.Device
 }
 
-func (l *ledger) getPublicKey(odevpath ...uint32) ([]byte, string, []byte) {
-	cmd := []byte{0xE0, 0x40, 0, 0, 5, 1, 0,0,0,1}
-	//cmd := []byte{0xE0, 0x24, 0, 0, 0, 1}
-	//cmd := []byte{ 0x80, 0x02, 0xF0, 0x0D}
+func (l *ledger) getEthereumAddress(path []uint32) ([]byte, string, error) {
+	cmd := []byte{0xe0, 0x02, 1, 1}
 
-	_, err := l.odev.Write(APDUEncode(cmd))
+	params := encodePath(path)
+	cmd = append(cmd, byte(len(params)))
+	cmd = append(cmd, params...)
+
+	resp, err := l.Exchange(cmd)
 	if err != nil {
-		panic(err)
+		return nil, "", err
 	}
 
-
-	out := make([]byte, 256)
-	n, err := l.odev.Read(out)
-	if err != nil {
-		panic(err)
+	if len(resp) <= 2 {
+		msg := fmt.Sprintf("error code 0x%x", resp)
+		if bytes.Equal(resp, []byte{0x69, 0x82}) {
+			msg += ": device is locked"
+		}
+		return nil, "",  fmt.Errorf(msg)
 	}
-	fmt.Println("read this many bytes: ", n)
-
-	resp := APDUDecode(out[:n])
-	fmt.Println("resp len: ", len(resp))
 
 	pubklen := resp[0]
 	pubk := resp[1:1+pubklen]
@@ -162,7 +130,47 @@ func (l *ledger) getPublicKey(odevpath ...uint32) ([]byte, string, []byte) {
 	addrlen := resp[0]
 	addr := resp[1:1+addrlen]
 
-	resp = resp[1:1+addrlen]
-	fmt.Println("expect this to be 32: ", len(resp))
-	return pubk, string(addr), nil
+	return pubk, string(addr),  nil
+}
+
+func encodePath(p []uint32) []byte {
+	enc := make([]byte, 1+ (4 * len(p)))
+	enc[0] = byte(len(p))
+	for i, p := range p {
+		binary.BigEndian.PutUint32( enc[1+(4*i):], p)
+	}
+
+	return enc
+}
+
+func (l *ledger) getPublicKey(odevpath []uint32) ([]byte, string, []byte, error) {
+	cmd := []byte{0xE0, 0x40, 0, 0}
+
+	params := encodePath(odevpath)
+	cmd = append(cmd, byte(len(params)))
+	cmd = append(cmd, params...)
+
+	resp, err := l.Exchange(cmd)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	if len(resp) <= 2 {
+		msg := fmt.Sprintf("error code 0x%x", resp)
+		if bytes.Equal(resp, []byte{0x69, 0x82}) {
+			msg += ": device is locked"
+		}
+		return nil, "", nil, fmt.Errorf(msg)
+	}
+
+	pubklen := resp[0]
+	pubk := resp[1:1+pubklen]
+
+	resp = resp[1+pubklen:]
+
+	addrlen := resp[0]
+	addr := resp[1:1+addrlen]
+
+	chainID := resp[1+addrlen:]
+	return pubk, string(addr), chainID[:32], nil
 }
