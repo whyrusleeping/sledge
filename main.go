@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
-	"os"
-	"encoding/binary"
-	"bytes"
 
 	hid "github.com/karalabe/hid"
 )
@@ -14,7 +14,7 @@ import (
 const ledgerVendorID = 11415
 
 func main() {
-	devs := hid.Enumerate(ledgerVendorID,0)
+	devs := hid.Enumerate(ledgerVendorID, 0)
 
 	if len(devs) == 0 {
 		fmt.Println("no ledger found")
@@ -45,7 +45,7 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		_,addr,_, err := l.getPublicKey(path)
+		_, addr, err := l.getBitcoinAddress(path)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -60,7 +60,7 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		_,addr, err := l.getEthereumAddress(path)
+		_, addr, err := l.getEthereumAddress(path)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -102,7 +102,7 @@ type ledger struct {
 	odev *hid.Device
 }
 
-func (l *ledger) getEthereumAddress(path []uint32) ([]byte, string, error) {
+func (l *ledger) readKeyRoutine(t byte, path []uint32) ([]byte, string, error) {
 	cmd := []byte{0xe0, 0x02, 1, 1}
 
 	params := encodePath(path)
@@ -119,58 +119,35 @@ func (l *ledger) getEthereumAddress(path []uint32) ([]byte, string, error) {
 		if bytes.Equal(resp, []byte{0x69, 0x82}) {
 			msg += ": device is locked"
 		}
-		return nil, "",  fmt.Errorf(msg)
+		return nil, "", fmt.Errorf(msg)
 	}
 
 	pubklen := resp[0]
-	pubk := resp[1:1+pubklen]
+	pubk := resp[1 : 1+pubklen]
 
 	resp = resp[1+pubklen:]
 
 	addrlen := resp[0]
-	addr := resp[1:1+addrlen]
+	addr := resp[1 : 1+addrlen]
 
-	return pubk, string(addr),  nil
+	return pubk, string(addr), nil
 }
 
 func encodePath(p []uint32) []byte {
-	enc := make([]byte, 1+ (4 * len(p)))
+	enc := make([]byte, 1+(4*len(p)))
 	enc[0] = byte(len(p))
 	for i, p := range p {
-		binary.BigEndian.PutUint32( enc[1+(4*i):], p)
+		binary.BigEndian.PutUint32(enc[1+(4*i):], p)
 	}
 
 	return enc
 }
 
-func (l *ledger) getPublicKey(odevpath []uint32) ([]byte, string, []byte, error) {
-	cmd := []byte{0xE0, 0x40, 0, 0}
+func (l *ledger) getBitcoinAddress(odevpath []uint32) ([]byte, string, error) {
+	return l.readKeyRoutine(0x40, odevpath)
+}
 
-	params := encodePath(odevpath)
-	cmd = append(cmd, byte(len(params)))
-	cmd = append(cmd, params...)
-
-	resp, err := l.Exchange(cmd)
-	if err != nil {
-		return nil, "", nil, err
-	}
-
-	if len(resp) <= 2 {
-		msg := fmt.Sprintf("error code 0x%x", resp)
-		if bytes.Equal(resp, []byte{0x69, 0x82}) {
-			msg += ": device is locked"
-		}
-		return nil, "", nil, fmt.Errorf(msg)
-	}
-
-	pubklen := resp[0]
-	pubk := resp[1:1+pubklen]
-
-	resp = resp[1+pubklen:]
-
-	addrlen := resp[0]
-	addr := resp[1:1+addrlen]
-
-	chainID := resp[1+addrlen:]
-	return pubk, string(addr), chainID[:32], nil
+// TODO: doesnt work for some reason...
+func (l *ledger) getEthereumAddress(path []uint32) ([]byte, string, error) {
+	return l.readKeyRoutine(0x02, path)
 }

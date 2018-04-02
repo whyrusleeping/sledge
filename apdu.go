@@ -1,10 +1,10 @@
 package main
 
 import (
-	"encoding/binary"
-	"io"
-	"fmt"
 	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
 )
 
 /* References:
@@ -13,6 +13,7 @@ import (
 */
 const packetSize = 64
 
+// Exchange sends the given command to the device, and returns its response.
 func (l *ledger) Exchange(cmd []byte) ([]byte, error) {
 	_, err := l.odev.Write(APDUEncode(cmd))
 	if err != nil {
@@ -46,8 +47,6 @@ func APDUEncode(data []byte) []byte {
 	return buf
 }
 
-
-
 func readAPDUPrefix(data []byte) (uint16, byte, uint16) {
 	channel := binary.BigEndian.Uint16(data[:2])
 	tag := data[2]
@@ -67,7 +66,7 @@ func APDUDecode(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("expected channel to be 0x0101")
 	}
 	if tag != 5 {
-		return nil,fmt.Errorf("expected tag to be 5")
+		return nil, fmt.Errorf("expected tag to be 5")
 	}
 	if seq == 0xbf {
 		// sometimes i get this. To the best of my knowledge, it just means "you suck, try again".
@@ -82,41 +81,41 @@ func APDUDecode(r io.Reader) ([]byte, error) {
 	rlen := binary.BigEndian.Uint16(data[5:])
 
 	blockSize := rlen
-	if blockSize > packetSize - 7 {
+	if blockSize > packetSize-7 {
 		blockSize = packetSize - 7
 	}
 
 	out := new(bytes.Buffer)
-	out.Write(data[7:7+blockSize])
+	out.Write(data[7 : 7+blockSize])
 
 	for uint16(out.Len()) != rlen {
+		seq++
+
 		_, err := io.ReadFull(r, data)
 		if err != nil {
 			return nil, err
 		}
 
-		seq++
 		ch, tag, seqn := readAPDUPrefix(data)
 		if ch != 0x0101 {
-		return nil, fmt.Errorf("expected channel to be 0x0101")
-	}
-	if tag != 5 {
-		return nil,fmt.Errorf("expected tag to be 5")
+			return nil, fmt.Errorf("expected channel to be 0x0101")
+		}
+		if tag != 5 {
+			return nil, fmt.Errorf("expected tag to be 5")
 		}
 		if seqn != seq {
 			return nil, fmt.Errorf("invalid sequence number")
 		}
 
 		var blockSize uint16
-		if rlen - uint16(out.Len()) > packetSize - 5 {
+		if rlen-uint16(out.Len()) > packetSize-5 {
 			blockSize = packetSize - 5
 		} else {
 			blockSize = rlen - uint16(out.Len())
 		}
 
-		out.Write(data[5:5+blockSize])
+		out.Write(data[5 : 5+blockSize])
 	}
 
 	return out.Bytes(), nil
 }
-
